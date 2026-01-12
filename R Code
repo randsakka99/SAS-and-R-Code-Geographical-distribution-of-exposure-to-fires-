@@ -1,0 +1,646 @@
+#Install and load the following packages needed to run the code below: dplyr, tidyr, stringr, forcats, sf, tigris, lwgeom, broom, ggplot2, ggrepel, viridis, cowplot
+#Replace "data" in code with the name of the dataset as it is saved on your local system
+
+#Load state boundaries
+options(tigris_use_cache = TRUE)
+states <- states(cb = TRUE)  
+
+#Download census tract shapefile from the Zenodo repository and replace ... with file path
+census_tracts <- st_read("")
+
+#Figure 1A: Person-day exposure map
+Figure1A <- data[, c("GEOID10", "LONGITUDE", "LATITUDE", "PersonDayExp")]
+
+Figure1A <- Figure1A %>%
+  group_by(GEOID10) %>%
+  summarise(
+    Longitude = first(LONGITUDE),
+    Latitude  = first(LATITUDE),
+    PersonDayExp = sum(PersonDayExp, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+Figure1A$PersonDayExp <- Figure1A$PersonDayExp / 40000
+
+Figure1A <- Figure1A %>%
+  filter(PersonDayExp >= 1)
+
+Figure1A$GEOID10 <- sprintf("%011s", Figure1A$GEOID10)
+str(Figure1A$GEOID10)
+str(census_tracts$GEOID10)
+
+tracts_map <- census_tracts %>%
+  left_join(Figure1A, by = "GEOID10")
+
+tracts_map <- tracts_map %>%
+  filter(PersonDayExp >= 1)
+
+dots <- st_sample(
+  tracts_map,
+  size = tracts_map$PersonDayExp,
+  type = "random"
+)
+
+dots_sf <- st_sf(geometry = dots)
+
+ggplot() +
+  geom_sf(data = states, fill = NA, color = "lightgrey", size = 0.3) +
+  geom_sf(data = dots_sf, color = "red", size = 0.02, alpha = 0.01) +
+  coord_sf(
+    xlim = c(-170, -65),   
+    ylim = c(18, 72)       
+  ) +
+  theme_void()
+
+
+#Figure 1B: Bar chart
+Figure1B<- data[, c("Region", "PersonDayExp")]
+
+Figure1B <- Figure1B %>%
+  group_by(Region) %>%
+  summarise(
+    PersonDayExp = sum(PersonDayExp, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+Figure1B <- Figure1B %>%
+  mutate(PersonDayExp_Billions = PersonDayExp / 1000000000)
+
+Figure1B <- Figure1B %>%
+  mutate(
+    Region = case_when(
+      Region == "North" ~ "Northeast",
+      Region == "Midwe" ~ "Midwest",
+      TRUE ~ Region
+    )
+  )
+
+Figure1B <- Figure1B %>%
+  mutate(
+    Region = factor(
+      Region,
+      levels = c("Northeast", "West", "Midwest", "South")
+    )
+  )
+
+Figure1B <- Figure1B %>%
+  mutate(
+    PersonDayExp_label = format(PersonDayExp, big.mark = ",")
+  )
+
+Figure1B <- Figure1B %>%
+  mutate(
+    Percent_total = PersonDayExp / sum(PersonDayExp) * 100,
+    Percent_label = paste0(round(Percent_total), "%"),
+    PersonDayExp_label = paste0(
+      format(PersonDayExp, big.mark = ","),
+      "\n",
+      Percent_label
+    )
+  )
+
+ggplot(Figure1B, aes(x = PersonDayExp_Billions, y = Region, fill = Region)) +
+  geom_col() +
+  geom_text(
+    aes(label = PersonDayExp_label),
+    hjust = -0.05,
+    size = 3.5,
+    lineheight = 0.9
+  ) +
+  scale_fill_manual(values = c(
+    "Northeast" = "orange",
+    "West" = "gold",
+    "Midwest" = "steelblue",
+    "South" = "forestgreen"
+  )) +
+  scale_x_continuous(
+    limits = c(0, 6),
+    breaks = seq(0, 6, by = 1),
+    expand = expansion(mult = c(0, 0.08))
+  ) +
+  labs(
+    x = "Person-days of exposure to fires (billions)",
+    y = NULL
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    legend.position = "none",
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank()
+  )
+
+#Figure 1B: Map (Color blocks)
+options(tigris_use_cache = TRUE)
+states <- states(cb = TRUE)
+
+Northeast <- c("CT","ME","MA","NH","RI","VT","NJ","NY","PA")
+Midwest   <- c("IL","IN","MI","OH","WI","IA","KS","MN","MO","NE","ND","SD")
+South     <- c("DE","FL","GA","MD","NC","SC","VA","DC","WV","AL","KY","MS","TN","AR","LA","OK","TX")
+West      <- c("AZ","CO","ID","MT","NV","NM","UT","WY","AK","CA","HI","OR","WA")
+
+states <- states %>%
+  mutate(
+    Region = case_when(
+      STUSPS %in% Northeast ~ "Northeast",
+      STUSPS %in% Midwest   ~ "Midwest",
+      STUSPS %in% South     ~ "South",
+      STUSPS %in% West      ~ "West",
+      TRUE ~ NA_character_  # Territories
+    )
+  )
+
+states %>% select(NAME, STUSPS, Region)
+
+ggplot(states) +
+  geom_sf(aes(fill = Region), color = NA) +
+  scale_fill_manual(values = c(
+    "Northeast" = "orange",
+    "West" = "gold",
+    "Midwest" = "steelblue",
+    "South" = "forestgreen"
+  )) +
+  coord_sf(
+    xlim = c(-170, -65),
+    ylim = c(18, 72)
+  ) +
+  theme_void() +
+  theme(legend.position = "none")
+
+#Figure 2A
+Figure2A <- data %>% mutate(GEOID10 = sprintf("%011.0f", GEOID10))
+
+trend <- Figure2A %>% 
+group_by(GEOID10) %>% 
+group_modify(~{ 
+fit <- try(lm(PersonDayExp ~ Year, data = .x), silent = TRUE) 
+if(inherits(fit, "try-error")) return(tibble(Estimate = NA, pValue = NA)) 
+tidy_fit <- broom::tidy(fit) 
+tibble( 
+Estimate = tidy_fit$estimate[tidy_fit$term == "Year"], 
+pValue = tidy_fit$p.value[tidy_fit$term == "Year"] 
+) 
+}) %>% 
+ungroup() %>% 
+filter(pValue < 0.05) %>% 
+mutate( 
+color_raw = round(log(abs(Estimate)), 1), 
+color = cut( 
+color_raw, 
+breaks = seq(min(color_raw), max(color_raw), length.out = 14), 
+labels = FALSE, 
+include.lowest = TRUE 
+), 
+st = substr(GEOID10, 1, 2) 
+) %>% 
+filter(is.finite(color_raw))
+
+trend <- trend %>% mutate(GEOID10 = as.character(GEOID10))
+
+us_states_eqarea <- states(cb = TRUE, year=2010) %>%
+shift_geometry(preserve_area = FALSE)
+us_states_eq <- filter(us_states_eqarea,!STATE %in% c("72"))
+
+d_pal <- colorRampPalette(c("#CCEEF9","#4285f4"))
+d_colors <- d_pal(13)
+
+u_pal <- colorRampPalette(c("#FFC1C1","#ea4335"))
+u_colors <- u_pal(13)
+
+fire_state <- sort(unique(trend$st))
+
+layout(matrix(c(1,2), nrow = 2), heights = c(4,1))
+
+plot(us_states_eq$geometry, col = "white" , border = "#D3D3D3", bg = "white")
+
+for (s in fire_state) { 
+tracts_sf <- tracts(state = s, year = 2010) %>% 
+shift_geometry(preserve_area = FALSE) %>%
+mutate(GEOID10 = as.character(GEOID10))
+  
+together <- tracts_sf %>% 
+left_join(trend, by = "GEOID10") 
+  
+down <- filter(together, Estimate < 0) 
+if (nrow(down) > 0) { 
+fire_d <- d_colors[down$color] 
+plot(down$geometry, add = TRUE, col = fire_d, border = NA) 
+} 
+  
+up <- filter(together, Estimate > 0) 
+if (nrow(up) > 0) { 
+fire_u <- u_colors[up$color] 
+plot(up$geometry, add = TRUE, col = fire_u, border = NA) 
+} 
+}
+
+par(mar = c(3, 5, 1, 5))  
+
+legend_cols <- colorRampPalette(c("#4285f4", "white", "#ea4335"))(100)
+
+x <- seq(-1, 1, length.out = 100)
+y <- 1
+z <- matrix(x, nrow = length(x), ncol = length(y))
+
+image(
+  x = x,
+  y = y,
+  z = z,
+  col = legend_cols,
+  axes = FALSE,
+  xlab = "",
+  ylab = ""
+)
+axis(
+  side = 1,
+  at = c(-1, 0, 1),
+  labels = c("Decreasing trend", "No change", "Increasing trend"),
+  cex.axis = 0.9
+)
+mtext(
+  "Changes in person-day exposure to fires [log] (significant tracts only)",
+  side = 1,
+  line = 2,
+  cex = 0.9
+)
+
+#Figure 2B: Chart
+Figure2B<- data[, c("Region", "Year", "PersonDayExp")]
+
+Figure2B <- Figure2B %>%
+  group_by(Region, Year) %>%
+  summarise(
+    PersonDayExp = sum(PersonDayExp, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+Figure2B <- Figure2B %>%
+  mutate(PersonDayExp_Millions = PersonDayExp / 1000000)
+
+Figure2B <- Figure2B %>%
+  mutate(
+    Region = recode(Region,
+                    "Midwe" = "Midwest",
+                    "North" = "Northeast")
+  )
+
+region_colors <- c(
+  "Northeast" = "orange",
+  "West" = "gold",
+  "Midwest" = "steelblue",
+  "South" = "forestgreen"
+)
+
+label_data <- Figure2B %>%
+  group_by(Region) %>%
+  filter(Year == max(Year))
+
+scale_y_continuous(
+  limits = c(0, 600),       
+  breaks = seq(0, 600, by = 100)  
+)
+
+ggplot(Figure2B, aes(x = Year, y = PersonDayExp_Millions, color = Region)) +
+  geom_line(size = 1) +
+  geom_point(size = 2) +
+  geom_text_repel(
+    data = label_data,
+    aes(x = Year + 0.2, y = PersonDayExp_Millions, label = Region),
+    nudge_x = 0.2,
+    direction = "y",
+    hjust = 0,
+    segment.color = NA,  
+    size = 4,
+    fontface = "bold"
+  ) +
+  scale_color_manual(values = region_colors) +
+  scale_x_continuous(breaks = seq(2004, 2023, by = 1)) +
+  scale_y_continuous(
+    limits = c(0, 600),
+    breaks = seq(0, 600, by = 100) 
+  ) +
+  labs(
+    x = "Year",
+    y = "Person-days of exposure to fires (millions)"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    legend.position = "none",          
+    panel.grid = element_blank(),     
+    axis.text.x = element_text(angle = 45, hjust = 1)
+  )
+
+#Figure 3A
+Figure3A<- data[, c("Region", "STATE", "GEOID10", "Frequency", "Year")]
+
+Figure3A <- Figure3A %>%
+  mutate(
+    Region = recode(Region,
+                    "Midwe" = "Midwest",
+                    "North" = "Northeast")
+  )
+
+Figure3A <- Figure3A %>%
+  group_by(Year, Region) %>%
+  mutate(
+    Z_score = as.numeric(scale(Frequency))
+  ) %>%
+  ungroup()
+
+Figure3A <- Figure3A %>%
+  mutate(
+    STATE = recode(STATE,
+                    "Pennsyl" = "PA",
+                    "New Jer" = "NJ",
+                    "New Yor" = "NY",
+                    "Maine"   = "ME",
+                    "Mississ" = "MS",
+                    "Louisia" = "LA",
+                    "Georgia" = "GA",
+                    "Florida" = "FL",
+                    "Hawaii"  = "HI",
+                    "Califor" = "CA",
+                    "Arizona" = "AZ",
+                    "Alaska"  = "AK"))
+
+Figure3A <- Figure3A %>% filter(Z_score > 10)
+
+Figure3A <- Figure3A %>% mutate(TractLabel = paste(STATE, GEOID10, sep = ": ")) %>% arrange(Region, STATE, GEOID10)
+
+plot_data <- Figure3A %>%
+  mutate(
+    Year = as.integer(Year),
+    GEOID10 = as.character(GEOID10)
+  ) %>%
+  arrange(Region, STATE, GEOID10) %>%
+  mutate(
+    GEOID10 = fct_inorder(GEOID10)
+  )
+
+ggplot(Figure3A, aes(x = Year, y = TractLabel, fill = Frequency)) + 
+  geom_tile(color = "white") + 
+  scale_fill_gradientn( 
+    colours = c("ivory", "gold", "darkorange3", "darkorchid4", "black"), 
+    limits = c(1, 248), 
+    breaks = c(50, 100, 150, 200), 
+    name = "Frequency" 
+  ) + 
+  scale_y_discrete(limits = rev,
+    labels = function(x) gsub(":", " ", x)) +
+  scale_x_continuous(breaks = c(2004, 2008, 2012, 2016, 2020, 2024)) +
+  facet_grid(Region ~ ., scales = "free_y", space = "free", switch = "y") +
+  labs(x = "Year", y = "") + 
+  theme_minimal() + 
+  theme(
+    panel.grid = element_blank(),
+    axis.text.y = element_text(size = 6), 
+    strip.text.y = element_text(angle = 0), 
+    panel.spacing = unit(0.5, "lines"))
+
+#Figure 3B
+Fire_Map_Data <- data[, c("GEOID10", "STATE", "STATEA", "COUNTY", "COUNTYA", "TRACTA", "Frequency",
+                          "LATITUDE", "LONGITUDE", "FIPS", "Region", "Year")]
+
+Fire_Map_Data <- Fire_Map_Data %>%
+  mutate(
+    GEOID10 = str_pad(as.character(GEOID10), width = 11, pad = "0")
+  )
+
+class(census_tracts)
+class(Fire_Map_Data)
+
+map_data <- census_tracts %>%
+  left_join(Fire_Map_Data, by = "GEOID10")
+
+map_data_small <- map_data %>%
+  select(GEOID10, Frequency, geometry) %>%
+  filter(!is.na(Frequency), Frequency > 0)
+
+set.seed(123)  
+
+dots_sf <- map_data_small %>%
+  group_by(GEOID10) %>%
+  group_modify(~ {
+    n <- nrow(.x)               
+    geom <- .x$geometry[1]     
+    
+    pts <- st_sample(geom, size = n, exact = TRUE)
+    pts <- st_cast(pts, "POINT")  
+    
+    st_sf(.x %>% st_drop_geometry(), geometry = pts)
+  }) %>%
+  ungroup()
+
+class(dots_sf)
+st_geometry_type(dots_sf)
+
+names(dots_sf)
+class(dots_sf$geometry)
+dots_sf <- st_as_sf(dots_sf)
+class(dots_sf)
+st_geometry_type(dots_sf)
+
+class(states)
+class(dots_sf)
+
+st_geometry(states)
+st_geometry(dots_sf)
+
+options(tigris_use_cache = TRUE)
+
+states <- states(cb = TRUE)
+
+range(dots_sf$Frequency, na.rm = TRUE)
+quantile(dots_sf$Frequency, c(.5, .9, .95, .99), na.rm = TRUE)
+
+sf_bbox <- st_bbox(c(
+  xmin = -82,
+  xmax = -80,
+  ymin = 26.1,
+  ymax = 28.1
+), crs = st_crs(states))
+
+crs_main <- 5070
+
+states_p <- st_transform(states, crs_main)
+dots_p   <- st_transform(dots_sf, crs_main)
+
+states_shifted <- states(cb = TRUE, year = 2010) %>%
+  shift_geometry(preserve_area = FALSE)%>%
+filter(!STATE %in% c("72"))
+
+dots_sf_shifted <- dots_sf %>%
+  st_transform(3857) %>%   
+  shift_geometry(preserve_area = FALSE)
+
+#Main map
+main_map <- ggplot() +
+  geom_sf(
+    data = dots_sf_shifted,
+    aes(color = Frequency),
+    shape = 16,
+    size  = 0.72,  
+    alpha = 0.55,  
+    stroke = 0
+  )+
+  geom_sf(data = states_shifted,
+          fill = NA,
+          color = "grey80",
+          linewidth = 0.3) +
+  scale_color_gradientn(
+    colours = c(
+      "ivory",       
+      "gold",
+      "darkorange3",
+      "darkorchid4",
+      "black"
+    ),
+    limits = c(1, 248),
+    breaks = c(50, 100, 150, 200),
+    name   = NULL
+  )+
+  theme_void() +
+  theme(
+    legend.position   = c(0.08, 0.55),
+    legend.direction  = "vertical",
+    legend.key.height = unit(1.2, "lines"),
+    legend.text       = element_text(size = 9)
+  ) +
+  coord_sf(crs = crs_main, datum = NA)   
+
+final_map <- ggdraw() +
+draw_plot(main_map)
+final_map
+                   
+#Figure 3C
+#GEOID10S obtained from Figure3A dataset (see code above)
+Outlier_GEOID10s <- c(
+  "12119910500", "12099008301", "12099007912",
+  "12097043800", "12051000600", "12051000300",
+  "12051000200", "12043000300", "12043000200",
+  "23003952900", "34005704700", "36045980000", 
+  "42059970502", "42035030500", "42003521302",
+  "13205090100", "13087970200", "22023970100", 
+  "28045030602", "02290000200", "02290000100",
+  "04005001500", "06021010300", "15001021106"
+)
+
+outlier_tracts <- census_tracts %>%
+  filter(GEOID10 %in% Outlier_GEOID10s) %>%
+  shift_geometry(preserve_area = FALSE) 
+
+US_outlier_map <- ggplot() +
+  geom_sf(data = outlier_tracts, fill = NA, color = "red", linewidth = 0.4) +
+  geom_sf(data = states_shifted, fill = NA, color = "grey70", linewidth = 0.4) +
+  coord_sf(datum = NA) +
+  theme_void()
+US_outlier_map
+
+#Population shifts. The code below assesses how changes in population contribute to changes in person-day exposure and corresponds to Equations 4–6 in the manuscript.
+#Entire study region
+#EQUATION 4
+model1 <- lmer(
+  PersonDayExp ~ Year + (1 | GEOID10) + (0 + Year | GEOID10),
+  data = data,
+  REML = FALSE  
+)
+summary(model1)
+#EQUATION 5
+model2 <- lmer(
+  PersonDayExp ~ Population + Year +  (1 | GEOID10) + (0 + Year | GEOID10),
+  data = data,
+  REML = FALSE
+)
+summary(model2)
+#EQUATION 6 
+beta_t_unadj <- fixef(model1)["Year"] 
+beta_t_adj <- fixef(model2)["Year"] 
+percent_explained <- (beta_t_unadj - beta_t_adj) / beta_t_unadj 
+percent_explained
+
+#North
+North <- data %>% filter(Region == "North")
+#EQUATION 4
+model1 <- lmer(
+  PersonDayExp ~ Year + (1 | GEOID10) + (0 + Year | GEOID10),
+  data = North,
+  REML = FALSE  
+)
+summary(model1)
+#EQUATION 5
+model2 <- lmer(
+  PersonDayExp ~ Population + Year +  (1 | GEOID10) + (0 + Year | GEOID10),
+  data = North,
+  REML = FALSE
+)
+summary(model2)
+#EQUATION 6 
+beta_t_unadj <- fixef(model1)["Year"] 
+beta_t_adj <- fixef(model2)["Year"] 
+percent_explained <- (beta_t_unadj - beta_t_adj) / beta_t_unadj 
+percent_explained
+
+#West
+West <- data %>% filter(Region == "West")
+#EQUATION 4
+model1 <- lmer(
+  PersonDayExp ~ Year + (1 | GEOID10) + (0 + Year | GEOID10),
+  data = West,
+  REML = FALSE  
+)
+summary(model1)
+#EQUATION 5
+model2 <- lmer(
+  PersonDayExp ~ Population + Year +  (1 | GEOID10) + (0 + Year | GEOID10),
+  data = West,
+  REML = FALSE
+)
+summary(model2)
+#EQUATION 6 
+beta_t_unadj <- fixef(model1)["Year"] 
+beta_t_adj <- fixef(model2)["Year"] 
+percent_explained <- (beta_t_unadj - beta_t_adj) / beta_t_unadj 
+percent_explained
+
+#Midwest
+Midwe <- data %>% filter(Region == "Midwe")
+#EQUATION 4
+model1 <- lmer(
+  PersonDayExp ~ Year + (1 | GEOID10) + (0 + Year | GEOID10),
+  data = Midwe,
+  REML = FALSE  
+)
+summary(model1)
+#EQUATION 5
+model2 <- lmer(
+  PersonDayExp ~ Population + Year +  (1 | GEOID10) + (0 + Year | GEOID10),
+  data = Midwe,
+  REML = FALSE
+)
+summary(model2)
+#EQUATION 6 
+beta_t_unadj <- fixef(model1)["Year"] 
+beta_t_adj <- fixef(model2)["Year"] 
+percent_explained <- (beta_t_unadj - beta_t_adj) / beta_t_unadj 
+percent_explained
+
+#South
+South <- data %>% filter(Region == "South")
+#EQUATION 4
+model1 <- lmer(
+  PersonDayExp ~ Year + (1 | GEOID10) + (0 + Year | GEOID10),
+  data = South,
+  REML = FALSE  
+)
+summary(model1)
+#EQUATION 5
+model2 <- lmer(
+  PersonDayExp ~ Population + Year +  (1 | GEOID10) + (0 + Year | GEOID10),
+  data = South,
+  REML = FALSE
+)
+summary(model2)
+#EQUATION 6 
+beta_t_unadj <- fixef(model1)["Year"] 
+beta_t_adj <- fixef(model2)["Year"] 
+percent_explained <- (beta_t_unadj - beta_t_adj) / beta_t_unadj 
+percent_explained   
