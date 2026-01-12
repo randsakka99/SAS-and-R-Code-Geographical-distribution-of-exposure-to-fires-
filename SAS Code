@@ -1,0 +1,80 @@
+/*Software: SAS 9.4*/  
+/*Study: Geographical distribution of exposure to fires in the United States between 2004 and 2023*/  
+
+/*2004-2009 and 2011-2019 population estimates using 2000, 2010, and 2020 census data*/ 
+/* Input dataset: replace "Dataset" with your analytic dataset name*/ 
+data Annual_Population;  
+set Datset; 
+array pop_00_10[11] Year2000-Year2010; 
+do year = 2000 to 2010; 
+   days_elapsed = intck('day', mdy(1,1,2000), mdy(1,1,year)); 
+   interval_days = intck('day', mdy(1,1,2000), mdy(1,1,2010)); 
+   pop_00_10[year-1999] = (Year2010 * (days_elapsed / interval_days))  
+  + (Year2000 * ((interval_days - days_elapsed)/interval_days)); 
+end; 
+ 
+array pop_10_20[11] Year2010-Year2020;  
+do year = 2010 to 2020; 
+days_elapsed = intck('day', mdy(1,1,2010), mdy(1,1,year));  
+interval_days = intck('day', mdy(1,1,2010), mdy(1,1,2020));  
+pop_10_20[year-2009] = (Year2020 * (days_elapsed / interval_days))  
++ (Year2010 * ((interval_days - days_elapsed)/interval_days)); 
+end; 
+run; 
+
+/* Autoregressive time-series model used to estimate population distributions for census tracts, 2021–2023*/  
+/* PROC FORECAST is applied separately by census tract to calculate total population and race/ethnicity-specific population counts based on 2004-2020 historical trends./  
+/* Input dataset: replace "Dataset" with your analytic dataset name*/  
+
+proc forecast data = Dataset lead=3 out=census_forecast;  
+by GEOID10;  
+var Population NH_White NH_Black NH_AIAN NH_AAPI NH_Other Hispanic; 
+id year; 
+run; 
+
+/*Mixed-effects models evaluating population shifts and their contribution to changes in person-day fire exposure*/ 
+/* Variable definitions: 
+GEOID10: Census tract identifier 
+Year 
+PersonDayExp: Person-day exposure to fire 
+Population: Total population in a census tract */ 
+/* Input dataset: replace "Dataset" with your analytic dataset name*/  
+
+proc mixed data=Dataset method=ml covtest noclprint;  
+class GEOID10;  
+model PersonDayExp = Year / solution ddfm=Satterthwaite;  
+random intercept Year / subject=GEOID10 type=vc;  
+run; 
+
+proc mixed data=Dataset method=ml covtest noclprint;  
+class GEOID10;  
+model PersonDayExp = Population Year / solution ddfm=Satterthwaite;  
+random intercept Year / subject=GEOID10 type=vc;  
+run; 
+
+/* Z-score analysis to identify census tracts that are extreme outliers (z-score > 10) within each region-year combination */  
+/ Input dataset: replace "Dataset" with your analytic dataset name*/ 
+
+proc means data=Dataset noprint;  
+class Region Year; 
+ var PersonDayExp;  
+output out=RegionYearStats  
+mean = Mean_PDE  
+std = SD_PDE; 
+run;  
+  
+proc sql;  
+create table Fire_ZScores as 
+ select a.*, 
+ b.Mean_PDE, 
+ b.SD_PDE,  
+(a.PersonDayExp - b.Mean_PDE) / b.SD_PDE as Zscore  
+from Dataset as a 
+ left join RegionYearStats as b  
+on a.Region = b.Region and a.Year = b.Year;  
+quit;  
+
+data Fire_ZScores;  
+set Fire_ZScores;  
+ExtremeOutlier = (Zscore > 10);  
+run; 
