@@ -3,6 +3,7 @@
 
 /*2004-2009 and 2011-2019 population estimates using 2000, 2010, and 2020 census data*/ 
 /* Input dataset: replace "Dataset" with your analytic dataset name*/ 
+
 data Annual_Population;  
 set Datset; 
 array pop_00_10[11] Year2000-Year2010; 
@@ -43,38 +44,50 @@ Population: Total population in a census tract */
 proc mixed data=Dataset method=ml covtest noclprint;  
 class GEOID10;  
 model PersonDayExp = Year / solution ddfm=Satterthwaite;  
-random intercept Year / subject=GEOID10 type=vc;  
+random intercept / subject=GEOID10 type=vc;  
 run; 
 
 proc mixed data=Dataset method=ml covtest noclprint;  
 class GEOID10;  
 model PersonDayExp = Population Year / solution ddfm=Satterthwaite;  
-random intercept Year / subject=GEOID10 type=vc;  
+random intercept / subject=GEOID10 type=vc;  
 run; 
 
-/* Z-score analysis to identify census tracts that are extreme outliers (z-score > 10) within each region-year combination */  
-/ Input dataset: replace "Dataset" with your analytic dataset name*/ 
 
-proc means data=Dataset noprint;  
-class Region Year; 
- var PersonDayExp;  
-output out=RegionYearStats  
-mean = Mean_PDE  
-std = SD_PDE; 
-run;  
-  
-proc sql;  
-create table Fire_ZScores as 
- select a.*, 
- b.Mean_PDE, 
- b.SD_PDE,  
-(a.PersonDayExp - b.Mean_PDE) / b.SD_PDE as Zscore  
-from Dataset as a 
- left join RegionYearStats as b  
-on a.Region = b.Region and a.Year = b.Year;  
-quit;  
+/*SAS Code to identify census tracts with consistently high fire days (e.g. top 1% for all years of the study period)*/
+data Figure_3A;
+set data;
+keep GEOID10 Year Region Frequency;
+run;
 
-data Fire_ZScores;  
-set Fire_ZScores;  
-ExtremeOutlier = (Zscore > 10);  
-run; 
+/* Compute percent rank within each Region-Year group */
+proc rank data=Figure_3A out=Figure_3A percent ties=mean;
+by Region Year;
+var Frequency;
+ranks Percentile;
+run;
+
+/* Filter to top 1% (percentile >= 99) */
+data Figure_3A;
+set Figure_3A;
+where Percentile >= 99;
+run;
+
+/* Count total census tracts in top 1% at any point in study period */
+proc sort data=Figure_3A nodupkey out=GEOID10_Count;
+by GEOID10;
+run;
+
+/* Count years each tract appears in top 1% */
+proc sql;
+create table Figure_3A as
+select *
+from Figure_3A
+group by GEOID10
+having count(*) = 20;
+quit;
+
+/* Keep one row per tract */
+proc sort data=Figure_3A nodupkey out=Figure_3A;
+by GEOID10;
+run;
